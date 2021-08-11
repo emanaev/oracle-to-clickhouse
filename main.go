@@ -4,17 +4,20 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
-var flagFile string
-var flagDSN string
-var flagDebug bool
+var (
+	flagFile  string
+	flagDSN   string
+	flagDebug bool
+)
 
 // TODO: add more data types and find a solution for the precision problem
 var ora2ChConversion = map[string]string{
@@ -79,13 +82,12 @@ func connectByFile(filename string) []oracleDbSchema {
 }
 
 func connectByODBC(dsn string) []oracleDbSchema {
-
 	// TODO: test if odbc connection works
 	var queryResult oracleDbSchema
 	var allQueryResult []oracleDbSchema
 	var err error
 
-	//Open Connection. Provide DSN, Username and Password
+	// Open Connection. Provide DSN, Username and Password
 	db, err := sql.Open("odbc", fmt.Sprintf("DSN=%v", dsn))
 	if err != nil {
 		log.Panic().Err(err).Msg("Couldn't connect to database")
@@ -93,14 +95,13 @@ func connectByODBC(dsn string) []oracleDbSchema {
 		log.Debug().Msg("Connection to DB successful")
 	}
 
-	//Provide the Query to execute
+	// Provide the Query to execute
 	rows, err := db.Query("SELECT * from all_tab_columns")
-
 	if err != nil {
 		log.Panic().Err(err).Msg("Unable to query")
 	}
 
-	//Parse the Result set
+	// Parse the Result set
 	for rows.Next() {
 		err = rows.Scan(&queryResult.owner, &queryResult.tableName, &queryResult.columnName, &queryResult.dataType, nil, nil, &queryResult.dataLength, &queryResult.dataPrecision, nil, &queryResult.nullable)
 		if err != nil {
@@ -109,7 +110,7 @@ func connectByODBC(dsn string) []oracleDbSchema {
 		allQueryResult = append(allQueryResult, queryResult)
 	}
 
-	//Close the connection
+	// Close the connection
 	err = rows.Close()
 	if err != nil {
 		log.Err(err)
@@ -167,7 +168,7 @@ func generateClickhouseQuery(oracleDbSchemas []oracleDbSchema) string {
 				log.Debug().Str("sqlHead", sqlHead).Str("sqlFoot", sqlFoot)
 			}
 		}
-		//cut off trailing comma in sql query
+		// cut off trailing comma in sql query
 		sqlColumns = sqlColumns[:len(sqlColumns)-1]
 		sqlQuery = sqlDropTable + "\n" + sqlHead + sqlColumns + sqlFoot + "\n\n"
 		log.Debug().Str("sqlQuery", sqlQuery)
@@ -248,8 +249,8 @@ func parseFile(content string) []oracleDbSchema {
 
 	return allOracleTableData
 }
-func openFile(filename string) string {
 
+func openFile(filename string) string {
 	dat, err := ioutil.ReadFile(filename)
 	if err != nil {
 		log.Panic().Err(err).Msg("Couldn't read file")
