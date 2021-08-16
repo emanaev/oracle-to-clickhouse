@@ -4,26 +4,72 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 )
 
+var cfg Config
+
+type Config struct {
+	oracle struct {
+		databaseImport struct {
+			dsn      string `yaml:"dsn"`
+			database string `yaml:"database"`
+		} `yaml:"database_import"`
+		fileImport struct {
+			fileLocation string `yaml:"file_location"`
+		} `yaml:"file_import"`
+	} `yaml:"oracle"`
+	clickhouse struct {
+		tablePrefix  string `yaml:"table_prefix"`
+		fileLocation string `yaml:"file_location"`
+	} `yaml:"clickhouse"`
+	general struct {
+		debug bool `yaml:"debug"`
+	} `yaml:"general"`
+}
+
 var (
-	flagFile  string
-	flagDSN   string
-	flagDebug bool
+	flagDebug  bool
+	flagConfig string
 )
 
 // TODO: add more data types and find a solution for the precision problem
 var ora2ChConversion = map[string]string{
-	"VARCHAR2": "string",
-	"NUMBER":   "decimal",
-	"CHAR":     "string",
+	"ANYDATA":                  "String",
+	"BINARY_DOUBLE":            "String",
+	"BLOB":                     "String",
+	"CHAR":                     "String",
+	"CLOB":                     "String",
+	"COL_CLS_LIST":             "String",
+	"DATE":                     "DateTime",
+	"DS_VARRAY_4_CLOB":         "String",
+	"FLOAT":                    "Float128",
+	"LONG":                     "Int128",
+	"LONGRAW":                  "Int128",
+	"NUMBER":                   "Decimal256(30)",
+	"NVARCHAR2":                "String",
+	"RAW":                      "String",
+	"ROWID":                    "Int128",
+	"SDO_DIM_ARRAY":            "String",
+	"SDO_GEOMETRY":             "String",
+	"SDO_NUMBER_ARRAY":         "String",
+	"SDO_ORGSCL_TYPE":          "String",
+	"SDO_STRING_ARRAY":         "String",
+	"TIMESTAMP(0)":             "DateTime",
+	"TIMESTAMP(3)":             "DateTime",
+	"TIMESTAMP(3)WITHTIMEZONE": "DateTime",
+	"TIMESTAMP(6)":             "DateTime",
+	"TIMESTAMP(6)WITHTIMEZONE": "DateTime",
+	"TIMESTAMP(9)":             "DateTime",
+	"UNDEFINED":                "String",
+	"VARCHAR2":                 "String",
+	"XMLTYPE":                  "String",
 }
 
 type oracleDbSchema struct {
@@ -37,31 +83,49 @@ type oracleDbSchema struct {
 }
 
 func init() {
-	flag.StringVar(&flagFile, "file", "", "file path an name")
-	flag.StringVar(&flagDSN, "dsn", "", "dsn name of odbc service")
 	flag.BoolVar(&flagDebug, "debug", false, "debug mode")
-}
-
-func main() {
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	var data []oracleDbSchema
+	flag.StringVar(&flagConfig, "config", "config.yaml", "config file")
 
 	flag.Parse()
 
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
+	f, err := os.Open(flagConfig)
+	if err != nil {
+		log.Panic().Err(err).Msg("Couldn't open config file")
+	}
+
+	decoder := yaml.NewDecoder(f)
+	err = decoder.Decode(&cfg)
+	if err != nil {
+		log.Panic().Err(err).Msg("Error while parsing config file")
+	}
+	err = f.Close()
+	if err != nil {
+		log.Panic().Err(err).Msg("Error while closing file handler")
+	}
+}
+
+func main() {
+
+	var data []oracleDbSchema
+
+	flagDebug = true
+
 	if flagDebug {
-		flagFile = "output_example"
+		cfg.oracle.fileImport.fileLocation = "output_example"
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
 
-	if flagFile != "" && flagDSN != "" {
-		log.Panic().Msg("Provided too many flags, only one is allowed")
-	} else if flagFile != "" && flagDSN == "" {
-		data = connectByFile(flagFile)
-	} else if flagDSN != "" && flagFile == "" {
-		data = connectByODBC(flagDSN)
+	if cfg.oracle.fileImport.fileLocation != "" && cfg.oracle.databaseImport.dsn != "" {
+		log.Panic().Msg("Please provide at least 'database_import' and optionally 'file_import' in your config")
+	} else if cfg.oracle.fileImport.fileLocation != "" {
+		data = connectByFile(cfg.oracle.fileImport.fileLocation)
+	} else if cfg.oracle.fileImport.fileLocation == "" {
+		data = connectByODBC(cfg.oracle.databaseImport.dsn)
 	} else {
-		log.Panic().Msg("No flags were provided, need at least one")
+		log.Panic().Msg("Please either provide at least 'database_import' in your config")
 	}
 
 	clickhouseQuery := generateClickhouseQuery(data)
@@ -125,7 +189,8 @@ func connectByODBC(dsn string) []oracleDbSchema {
 
 func saveClickhouseQuery(sqlQuery string) {
 	var err error
-	f, err := os.Create("clickhouse_query.sql")
+	var f *os.File
+	f, err = os.OpenFile(cfg.clickhouse.fileLocation, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Error().Err(err).Msg("Couldn't create file")
 	}
@@ -156,25 +221,31 @@ func generateClickhouseQuery(oracleDbSchemas []oracleDbSchema) string {
 
 	for _, allTableName := range allTableNames {
 		log.Debug().Str("allTableName", allTableName.tableName)
-
+		if allTableName.owner != "REPLACE" {
+			continue
+		}
 		for _, item := range oracleDbSchemas {
 
 			log.Debug().Str("oracleDbSchemas", item.tableName)
-			sqlDropTable = fmt.Sprintf("DROP TABLE IF EXIST %v;", allTableName.tableName)
+			sqlDropTable = fmt.Sprintf("DROP TABLE IF EXISTS %v%v;", sqlTablePrefix, allTableName.tableName)
 			sqlHead = fmt.Sprintf("CREATE TABLE %v%v (", sqlTablePrefix, allTableName.tableName)
-			sqlFoot = fmt.Sprintf(") ENGINE = ODBC(dsnName, %v, %v);", item.owner, allTableName.tableName)
+			sqlFoot = fmt.Sprintf(") ENGINE = ODBC('DSN=%v', '%v', '%v');", cfg.oracle.databaseImport.dsn, item.owner, allTableName.tableName) // TODO: Config of REPLACE
 			if item.tableName == allTableName.tableName {
 				sqlColumns += fmt.Sprintf("`%v` %v,", item.columnName, ora2ChConversion[item.dataType])
 				log.Debug().Str("sqlHead", sqlHead).Str("sqlFoot", sqlFoot)
 			}
+
 		}
-		// cut off trailing comma in sql query
-		sqlColumns = sqlColumns[:len(sqlColumns)-1]
-		sqlQuery = sqlDropTable + "\n" + sqlHead + sqlColumns + sqlFoot + "\n\n"
-		log.Debug().Str("sqlQuery", sqlQuery)
-		sqlHead = ""
-		sqlColumns = ""
-		sqlFoot = ""
+		if sqlColumns != "" {
+			// cut off trailing comma in sql query
+			sqlColumns = sqlColumns[:len(sqlColumns)-1]
+			sqlQuery += sqlDropTable + "\n" + sqlHead + sqlColumns + sqlFoot + "\n\n"
+			log.Debug().Str("sqlQuery", sqlQuery)
+			sqlHead = ""
+			sqlColumns = ""
+			sqlFoot = ""
+		}
+
 	}
 	return sqlQuery
 }

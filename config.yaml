@@ -1,0 +1,11 @@
+clickhouse:
+  file_location: clickhouse_query.sql
+  table_prefix: ora_
+general:
+  debug: true
+oracle:
+  database_import:
+    database: MyDatabase
+    dsn: localhost
+  file_import:
+    file_location: output_example
